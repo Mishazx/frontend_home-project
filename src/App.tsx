@@ -3,6 +3,9 @@ import reactLogo from './assets/react.svg'
 import viteLogo from '/vite.svg'
 import styled from 'styled-components'
 import Login from './Login'
+import SideMenu from './SideMenu'
+import AdminClients from './pages/AdminClients'
+import Home from './pages/Home'
 import { authService } from './authService'
 import type { User } from './authService'
 
@@ -85,8 +88,8 @@ const ReactLogo = styled(Logo)`
 `
 
 const Title = styled.h1`
-  font-size: 3.2em;
-  line-height: 1.1;
+  font-size: 1.8em;
+  line-height: 1.2;
 `
 
 const Card = styled.div`
@@ -123,10 +126,10 @@ const ReadTheDocs = styled.p`
 `
 
 function App() {
-  const [count, setCount] = useState(0)
   const [isAuthenticated, setIsAuthenticated] = useState(false)
   const [user, setUser] = useState<User | null>(null)
   const [loading, setLoading] = useState(true)
+  const [currentPage, setCurrentPage] = useState<string>('home')
 
   // Проверяем токен при загрузке приложения
   useEffect(() => {
@@ -152,11 +155,25 @@ function App() {
     setUser(user)
   }
 
+  const handleReconnect = () => {
+    // Простая реализация переподключения: повторно проверим токен
+    authService.validateToken().then((u) => {
+      if (u) {
+        setUser(u)
+        setIsAuthenticated(true)
+      } else {
+        window.location.reload()
+      }
+    })
+  }
+
   const handleLogout = () => {
     authService.logout()
     setIsAuthenticated(false)
     setUser(null)
   }
+
+  // убрал переключатель видимости админки — всегда показываем админ
 
   if (loading) {
     return (
@@ -172,35 +189,22 @@ function App() {
 
   return (
     <AppContainer>
-      <AppHeader>
-        <UserInfo>
-          <UserText>Добро пожаловать, {user?.username}</UserText>
-          <LogoutButton onClick={handleLogout}>
-            Выйти
-          </LogoutButton>
-        </UserInfo>
-      </AppHeader>
+      <SideMenu user={user} onLogout={handleLogout} onReconnect={handleReconnect} onNavigate={(p) => setCurrentPage(p)} />
 
-      <LogosContainer>
-        <LogoLink href="https://vite.dev" target="_blank">
-          <Logo src={viteLogo} alt="Vite logo" />
-        </LogoLink>
-        <LogoLink href="https://react.dev" target="_blank">
-          <ReactLogo src={reactLogo} className="react" alt="React logo" />
-        </LogoLink>
-      </LogosContainer>
-      <Title>Vite + React</Title>
-      <Card>
-        <CounterButton onClick={() => setCount((count) => count + 1)}>
-          count is {count}
-        </CounterButton>
-        <Description>
-          Edit <Code>src/App.tsx</Code> and save to test HMR
-        </Description>
-      </Card>
-      <ReadTheDocs>
-        Click on the Vite and React logos to learn more
-      </ReadTheDocs>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, justifyContent: 'center' }}>
+        <Title>Admin Panel</Title>
+      </div>
+
+      <div style={{ marginTop: 20 }}>
+        {currentPage === 'home' && <Home />}
+        {currentPage === 'clients' && <AdminClients />}
+        {currentPage === 'enrollments' && (
+          <div style={{ textAlign: 'left' }}>
+            <h3>Enrollments</h3>
+            <p>Здесь будет список ожидающих заявок на подключение (enrollments).</p>
+          </div>
+        )}
+      </div>
     </AppContainer>
   )
 }
