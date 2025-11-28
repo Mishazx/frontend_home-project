@@ -29,6 +29,10 @@ const ClientDetail: React.FC<Props> = ({ clientId, onClose }) => {
   const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const currentTransferIdRef = useRef<string | null>(null)
 
+  // Порог для автоматического выбора chunked upload (в байтах).
+  // Переопределяется через Vite env `VITE_CHUNKED_THRESHOLD` (например 10485760 = 10 MiB).
+  const CHUNKED_THRESHOLD = Number((import.meta as any).env?.VITE_CHUNKED_THRESHOLD) || 10 * 1024 * 1024
+
   const stopPolling = () => {
     if (pollTimerRef.current) {
       clearInterval(pollTimerRef.current)
@@ -127,6 +131,22 @@ const ClientDetail: React.FC<Props> = ({ clientId, onClose }) => {
           {onClose && (
             <button onClick={onClose} style={{ marginLeft: 8 }}>Закрыть</button>
           )}
+          <button
+            onClick={async () => {
+              try {
+                const headers = { ...authService.getAuthHeaders() }
+                const res = await fetch(`/api/clients/${encodeURIComponent(clientId)}/reset_encryption`, { method: 'POST', headers })
+                if (!res.ok) throw new Error(`Error ${res.status}`)
+                alert('Encryption state reset')
+              } catch (err) {
+                console.error('reset encryption failed', err)
+                alert('Reset failed')
+              }
+            }}
+            style={{ marginLeft: 8 }}
+          >
+            Reset Encryption
+          </button>
         </div>
       </div>
 
@@ -164,9 +184,19 @@ const ClientDetail: React.FC<Props> = ({ clientId, onClose }) => {
                   setError('Укажите путь назначения на клиенте')
                   return
                 }
-
                 try {
                   setUploading(true)
+                  // Автоматически выбираем chunked upload для больших файлов
+                  if (fileToUpload.size > CHUNKED_THRESHOLD) {
+                    // Используем PoC chunked upload
+                    const transfer_id = await chunkedUpload(fileToUpload, clientId, uploadDest)
+                    if (!transfer_id) throw new Error('Не удалось получить transfer_id')
+                    setTransferStatus({ transfer_id, state: 'in_progress' })
+                    startPolling(transfer_id)
+                    return
+                  }
+
+                  // Мелкий файл: стандартный multipart POST к /api/files/upload/init
                   const form = new FormData()
                   form.append('file', fileToUpload)
                   form.append('client_id', clientId)
@@ -181,7 +211,7 @@ const ClientDetail: React.FC<Props> = ({ clientId, onClose }) => {
                     throw new Error(`Ошибка ${res.status}: ${txt}`)
                   }
                   const data = await res.json()
-                  const transfer_id = data.transfer_id || data.transferId || data.transferId || data.transfer_id
+                  const transfer_id = data.transfer_id || data.transferId || data.transfer_id
                   if (!transfer_id) {
                     setError('Не получили transfer_id')
                     setUploading(false)
@@ -200,6 +230,35 @@ const ClientDetail: React.FC<Props> = ({ clientId, onClose }) => {
               }}
             >
               Отправить файл на клиент
+            </button>
+            <button
+              onClick={async () => {
+                setError(null)
+                if (!fileToUpload) {
+                  setError('Выберите файл')
+                  return
+                }
+                if (!uploadDest) {
+                  setError('Укажите путь назначения на клиенте')
+                  return
+                }
+                try {
+                  setUploading(true)
+                  // Запускаем chunked upload PoC
+                  const transfer_id = await chunkedUpload(fileToUpload, clientId, uploadDest)
+                  if (!transfer_id) throw new Error('Не удалось получить transfer_id')
+                  setTransferStatus({ transfer_id, state: 'in_progress' })
+                  startPolling(transfer_id)
+                } catch (err) {
+                  console.error('chunked upload error', err)
+                  const ee = err as { message?: string }
+                  setError(ee?.message || String(err))
+                  setUploading(false)
+                }
+              }}
+              style={{ marginLeft: 8 }}
+            >
+              Отправить файл на клиент (chunked)
             </button>
           </div>
 
@@ -334,6 +393,48 @@ const ClientDetail: React.FC<Props> = ({ clientId, onClose }) => {
                     </span>
                   )}
                 </div>
+                <div style={{ marginTop: 8, display: 'flex', gap: 8 }}>
+                  {transferStatus.state === 'in_progress' && (
+                    <>
+                      <button
+                        onClick={async () => {
+                          try {
+                            const headers = { 'Content-Type': 'application/json', ...authService.getAuthHeaders() }
+                            await fetch('/api/files/transfers/pause', { method: 'POST', headers, body: JSON.stringify({ transfer_id: transferStatus.transfer_id }) })
+                          } catch (err) {
+                            console.error('pause failed', err)
+                          }
+                        }}
+                      >
+                        Pause
+                      </button>
+                      <button
+                        onClick={async () => {
+                          try {
+                            const headers = { 'Content-Type': 'application/json', ...authService.getAuthHeaders() }
+                            await fetch('/api/files/transfers/resume', { method: 'POST', headers, body: JSON.stringify({ transfer_id: transferStatus.transfer_id }) })
+                          } catch (err) {
+                            console.error('resume failed', err)
+                          }
+                        }}
+                      >
+                        Resume
+                      </button>
+                      <button
+                        onClick={async () => {
+                          try {
+                            const headers = { 'Content-Type': 'application/json', ...authService.getAuthHeaders() }
+                            await fetch('/api/files/transfers/cancel', { method: 'POST', headers, body: JSON.stringify({ transfer_id: transferStatus.transfer_id }) })
+                          } catch (err) {
+                            console.error('cancel failed', err)
+                          }
+                        }}
+                      >
+                        Cancel
+                      </button>
+                    </>
+                  )}
+                </div>
               </div>
             </div>
           )}
@@ -416,6 +517,108 @@ const ClientDetail: React.FC<Props> = ({ clientId, onClose }) => {
       </div>
     </div>
   )
+}
+
+async function chunkedUpload(file: File, clientId: string, path: string) {
+  const chunkSize = 4 * 1024 * 1024 // 4 MiB
+  const headers = authService.getAuthHeaders()
+  const fingerprint = `${file.name}_${file.size}_${file.lastModified}_${clientId}_${path}`
+  let transferId: string | null = localStorage.getItem(`upload_${fingerprint}`)
+
+  // Если есть transferId — попытаться получить текущий received
+  let received = 0
+  if (transferId) {
+    try {
+      const st = await (await fetch(`/api/files/transfers/${transferId}/status`, { headers: { ...headers } })).json()
+      received = st.received || 0
+    } catch {
+      received = 0
+    }
+  }
+
+  while (received < file.size) {
+    // Parallel upload workers: build list of chunk ranges and upload with concurrency
+    const concurrency = 3
+    const chunks: Array<{ start: number; end: number; index: number }> = []
+    let cursor = received
+    while (cursor < Math.min(file.size, received + chunkSize * 32)) {
+      const s = cursor
+      const e = Math.min(file.size, s + chunkSize)
+      chunks.push({ start: s, end: e, index: s / chunkSize })
+      cursor = e
+    }
+
+    // Ensure uploads map exists
+    let ctrl: any
+    if (typeof window !== 'undefined') {
+      const w: any = window as any
+      w.__uploads = w.__uploads || {}
+      // control object for pause/cancel
+      w.__uploads[fingerprint] = w.__uploads[fingerprint] || { paused: false, cancelled: false }
+      ctrl = w.__uploads[fingerprint]
+    } else {
+      ctrl = { paused: false, cancelled: false }
+    }
+
+    const sendChunk = async (c: { start: number; end: number; index: number }) => {
+      // respect pause/cancel
+      while (ctrl.paused) {
+        if (ctrl.cancelled) throw new Error('cancelled')
+        await new Promise((r) => setTimeout(r, 300))
+      }
+      if (ctrl.cancelled) throw new Error('cancelled')
+      const slice = file.slice(c.start, c.end)
+      const form = new FormData()
+      form.append('client_id', clientId)
+      form.append('path', path)
+      form.append('offset', String(c.start))
+      form.append('file', slice)
+      form.append('original_filename', file.name)
+      if (transferId) form.append('transfer_id', transferId)
+
+      const res = await fetch('/api/files/upload/chunk', { method: 'POST', body: form, headers: { ...headers } })
+      if (!res.ok) {
+        const txt = await res.text()
+        throw new Error(`Upload chunk failed: ${res.status} ${txt}`)
+      }
+      const data = await res.json()
+      transferId = data.transfer_id
+      if (!transferId) throw new Error('Server did not return transfer_id')
+      localStorage.setItem(`upload_${fingerprint}`, transferId)
+      return data.received || (c.end - c.start)
+    }
+
+    // worker pool
+    const pool: Promise<void>[] = []
+    let idx = 0
+    const runNext = async () => {
+      if (idx >= chunks.length) return
+      const c = chunks[idx++]!
+      const r = await sendChunk(c)
+      // update received if this chunk advanced cursor
+      if (c.start + r > received) received = c.start + r
+      return runNext()
+    }
+
+    for (let i = 0; i < concurrency && i < chunks.length; i++) {
+      pool.push(runNext())
+    }
+
+    await Promise.all(pool)
+  }
+
+  // Complete
+  if (!transferId) throw new Error('Missing transfer_id before complete')
+  const formc = new FormData()
+  formc.append('transfer_id', transferId)
+  const rc = await fetch('/api/files/upload/complete', { method: 'POST', body: formc, headers: { ...headers } })
+  if (!rc.ok) {
+    const txt = await rc.text()
+    throw new Error(`Complete failed: ${rc.status} ${txt}`)
+  }
+  // Cleanup local resume info
+  localStorage.removeItem(`upload_${fingerprint}`)
+  return transferId
 }
 
 export default ClientDetail
