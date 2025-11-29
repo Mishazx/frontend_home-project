@@ -1,7 +1,15 @@
+// Enable React Router v7 future flags early (opt-in).
+// This silences console warnings and opts into planned v7 behaviors
+;(window as any).__REACT_ROUTER_FEATURES = {
+  v7_startTransition: true,
+  v7_relativeSplatPath: true,
+}
+
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { createGlobalStyle } from 'styled-components'
 import App from './App.tsx'
+import { BrowserRouter } from 'react-router-dom'
 
 const isDev = import.meta.env && import.meta.env.DEV
 
@@ -107,6 +115,8 @@ const GlobalStyle = createGlobalStyle`
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <GlobalStyle />
-    <App />
+    <BrowserRouter>
+      <App />
+    </BrowserRouter>
   </StrictMode>,
 )

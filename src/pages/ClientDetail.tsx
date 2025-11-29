@@ -1,6 +1,7 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import { authService } from '../authService'
 import TerminalPanel from '../components/TerminalPanel'
+import { useParams, useNavigate } from 'react-router-dom'
 
 type ClientInfo = {
   id: string
@@ -8,163 +9,88 @@ type ClientInfo = {
   ip?: string
   port?: number
   status?: string
-  connected_at?: string
   last_heartbeat?: string
 }
 
-type TransferStatus = {
-  transfer_id?: string
-  direction?: 'upload' | 'download' | string
-  client_id?: string | number
-  path?: string
-  original_filename?: string
-  source_path_server?: string
-  dest_path?: string
-  state?: 'in_progress' | 'completed' | 'failed' | 'paused' | string
-  size?: number
-  received?: number
-}
-
 type Props = {
-  clientId: string
+  clientId?: string
   onClose?: () => void
 }
 
-const ClientDetail: React.FC<Props> = ({ clientId, onClose }) => {
+const ClientDetail: React.FC<Props> = ({ clientId: propClientId, onClose }) => {
+  const params = useParams()
+  const navigate = useNavigate()
+  const clientId = propClientId || params.clientId || ''
+  const routeMode = !onClose && !!params.clientId
+
   const [client, setClient] = useState<ClientInfo | null>(null)
   const [loading, setLoading] = useState(false)
   const [command, setCommand] = useState('')
-  const [result, setResult] = useState<Record<string, unknown> | string | null>(null)
+  const [result, setResult] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
-  // terminal moved to TerminalPanel component
   const [fileToUpload, setFileToUpload] = useState<File | null>(null)
-  const [uploadDest, setUploadDest] = useState<string>('')
-  const [transferStatus, setTransferStatus] = useState<TransferStatus | null>(null)
   const [uploading, setUploading] = useState(false)
-  const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
-  const currentTransferIdRef = useRef<string | null>(null)
-
-  // Порог для автоматического выбора chunked upload (в байтах).
-  // Переопределяется через Vite env `VITE_CHUNKED_THRESHOLD` (например 10485760 = 10 MiB).
-  const CHUNKED_THRESHOLD = Number((import.meta.env as unknown as Record<string, string | undefined>).VITE_CHUNKED_THRESHOLD) || 10 * 1024 * 1024
-
-  const stopPolling = () => {
-    if (pollTimerRef.current) {
-      clearInterval(pollTimerRef.current)
-      pollTimerRef.current = null
-    }
-    currentTransferIdRef.current = null
-  }
-
-  const startPolling = (transferId: string, onComplete?: (status: Record<string, unknown>) => Promise<void> | void) => {
-    if (!transferId) return
-    if (currentTransferIdRef.current === transferId && pollTimerRef.current) {
-      return
-    }
-    stopPolling()
-    currentTransferIdRef.current = transferId
-    const poll = async () => {
-      try {
-        const headers = authService.getAuthHeaders()
-        const st = await (await fetch(`/api/files/transfers/${transferId}/status`, { headers: { ...headers } })).json()
-        setTransferStatus(st)
-        if (st.state && st.state !== 'in_progress') {
-          stopPolling()
-          setUploading(false)
-          if (onComplete) {
-            await onComplete(st)
-          }
-        }
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err)
-        console.error('poll status error', msg)
-        stopPolling()
-        setUploading(false)
-      }
-    }
-    poll()
-    pollTimerRef.current = setInterval(poll, 1500)
-  }
 
   useEffect(() => {
-    return () => {
-      stopPolling()
-    }
-  }, [])
-
-  useEffect(() => {
+    if (!clientId) return
+    let mounted = true
     const fetchClient = async () => {
       setLoading(true)
-      setError(null)
       try {
-        const headers = authService.getAuthHeaders()
-        const res = await fetch(`/api/clients/${encodeURIComponent(clientId)}`, { headers: { ...headers } })
-        if (!res.ok) throw new Error(`Не удалось получить клиента: ${res.status}`)
-        const data = await res.json()
-        setClient(data)
-      } catch (e: unknown) {
-        const msg = e instanceof Error ? e.message : String(e)
-        setError(msg)
+        const data = await authService.fetchJson(`/api/clients/${encodeURIComponent(clientId)}`)
+        if (mounted) setClient(data)
+      } catch (err) {
+        console.error('fetch client error', err)
+        if (mounted) setError(String(err))
       } finally {
-        setLoading(false)
+        if (mounted) setLoading(false)
       }
     }
     fetchClient()
+    return () => { mounted = false }
   }, [clientId])
 
   const sendCommand = async (asyncExec = false) => {
     setResult(null)
     setError(null)
-    if (!command || command.trim().length === 0) {
+    if (!command.trim()) {
       setError('Введите команду')
       return
     }
-
     try {
-      const headers = { 'Content-Type': 'application/json', ...authService.getAuthHeaders() }
       const endpoint = `/api/commands/${encodeURIComponent(clientId)}` + (asyncExec ? '/async' : '')
-      const body = JSON.stringify({ command: command.trim() })
-      const res = await fetch(endpoint, { method: 'POST', headers, body })
-
-      if (!res.ok) {
-        const txt = await res.text()
-        throw new Error(`Ошибка ${res.status}: ${txt}`)
-      }
-
-      const data = await res.json()
-      setResult(data)
-
-      // Если асинхронно — отобразим command_id и ссылку на статус
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e)
-      setError(msg)
+      const data = await authService.fetchJson(endpoint, { method: 'POST', body: JSON.stringify({ command: command.trim() }) })
+      setResult(typeof data === 'string' ? data : JSON.stringify(data, null, 2))
+    } catch (err) {
+      setError(String(err))
     }
   }
 
-  return (
-    <div style={{ textAlign: 'left', marginTop: 16, border: '1px solid #eee', padding: 12 }}>
+  const doUpload = async () => {
+    if (!fileToUpload) { setError('Выберите файл'); return }
+    setUploading(true)
+    try {
+      const form = new FormData()
+      form.append('file', fileToUpload)
+      form.append('client_id', clientId)
+      const data = await authService.fetchJson('/api/files/upload/init', { method: 'POST', body: form })
+      console.log('upload init', data)
+      alert('Upload started')
+    } catch (err) {
+      console.error('upload error', err)
+      setError(String(err))
+    } finally {
+      setUploading(false)
+    }
+  }
+
+  const container = (
+    <div style={{ textAlign: 'left', marginTop: 16 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between' }}>
         <h4>Клиент: {clientId}</h4>
         <div>
-          {onClose && (
-            <button onClick={onClose} style={{ marginLeft: 8 }}>Закрыть</button>
-          )}
-          <button
-            onClick={async () => {
-              try {
-                const headers = { ...authService.getAuthHeaders() }
-                const res = await fetch(`/api/clients/${encodeURIComponent(clientId)}/reset_encryption`, { method: 'POST', headers })
-                if (!res.ok) throw new Error(`Error ${res.status}`)
-                alert('Encryption state reset')
-              } catch (err) {
-                console.error('reset encryption failed', err)
-                alert('Reset failed')
-              }
-            }}
-            style={{ marginLeft: 8 }}
-          >
-            Reset Encryption
-          </button>
+          {onClose && <button onClick={onClose}>Закрыть</button>}
+          {!onClose && routeMode && <button onClick={() => navigate('/clients')}>Назад</button>}
         </div>
       </div>
 
@@ -181,495 +107,57 @@ const ClientDetail: React.FC<Props> = ({ clientId, onClose }) => {
       )}
 
       <div style={{ marginTop: 12 }}>
-        <div style={{ marginTop: 12 }}>
-          <h5>Terminal</h5>
-          {/* TerminalPanel encapsulates xterm + WebSocket logic and UI controls */}
-          <div style={{ marginTop: 8 }}>
-            {/* Lazy load component to keep bundle size small in future if needed */}
-            <React.Suspense fallback={<div>Loading terminal...</div>}>
-              <TerminalPanel clientId={clientId} />
-            </React.Suspense>
-          </div>
+        <h5>Terminal</h5>
+        <div style={{ marginTop: 8 }}>
+          <React.Suspense fallback={<div>Loading terminal...</div>}>
+            <TerminalPanel clientId={clientId} />
+          </React.Suspense>
         </div>
-
-        <div style={{ marginTop: 12, borderTop: '1px solid #eee', paddingTop: 12 }}>
-          <h5>Файлы</h5>
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-            <input type="file" onChange={(e) => setFileToUpload(e.target.files ? e.target.files[0] : null)} />
-            <input
-              placeholder="Путь на клиенте (например /tmp/upload.bin)"
-              value={uploadDest}
-              onChange={(e) => setUploadDest(e.target.value)}
-              style={{ flex: 1 }}
-            />
-            <button
-              onClick={async () => {
-                setError(null)
-                if (!fileToUpload) {
-                  setError('Выберите файл')
-                  return
-                }
-                if (!uploadDest) {
-                  setError('Укажите путь назначения на клиенте')
-                  return
-                }
-                try {
-                  setUploading(true)
-                  // Автоматически выбираем chunked upload для больших файлов
-                  if (fileToUpload.size > CHUNKED_THRESHOLD) {
-                    // Используем PoC chunked upload
-                    const transfer_id = await chunkedUpload(fileToUpload, clientId, uploadDest)
-                    if (!transfer_id) throw new Error('Не удалось получить transfer_id')
-                    setTransferStatus({ transfer_id, state: 'in_progress' })
-                    startPolling(transfer_id)
-                    return
-                  }
-
-                  // Мелкий файл: стандартный multipart POST к /api/files/upload/init
-                  const form = new FormData()
-                  form.append('file', fileToUpload)
-                  form.append('client_id', clientId)
-                  form.append('path', uploadDest)
-                  form.append('original_filename', fileToUpload.name)
-
-                  const headers = { ...authService.getAuthHeaders() }
-                  // Не указываем Content-Type, браузер сам установит boundary
-                  const res = await fetch('/api/files/upload/init', { method: 'POST', headers, body: form })
-                  if (!res.ok) {
-                    const txt = await res.text()
-                    throw new Error(`Ошибка ${res.status}: ${txt}`)
-                  }
-                  const data = await res.json()
-                  const transfer_id = data.transfer_id || data.transferId || data.transfer_id
-                  if (!transfer_id) {
-                    setError('Не получили transfer_id')
-                    setUploading(false)
-                    return
-                  }
-
-                  // Поли́нг статуса
-                  setTransferStatus({ transfer_id, state: 'in_progress' })
-                  startPolling(transfer_id)
-                } catch (err) {
-                  console.error('upload error', err)
-                  const ee = err as { message?: string }
-                  setError(ee?.message || String(err))
-                  setUploading(false)
-                }
-              }}
-            >
-              Отправить файл на клиент
-            </button>
-            <button
-              onClick={async () => {
-                setError(null)
-                if (!fileToUpload) {
-                  setError('Выберите файл')
-                  return
-                }
-                if (!uploadDest) {
-                  setError('Укажите путь назначения на клиенте')
-                  return
-                }
-                try {
-                  setUploading(true)
-                  // Запускаем chunked upload PoC
-                  const transfer_id = await chunkedUpload(fileToUpload, clientId, uploadDest)
-                  if (!transfer_id) throw new Error('Не удалось получить transfer_id')
-                  setTransferStatus({ transfer_id, state: 'in_progress' })
-                  startPolling(transfer_id)
-                } catch (err) {
-                  console.error('chunked upload error', err)
-                  const ee = err as { message?: string }
-                  setError(ee?.message || String(err))
-                  setUploading(false)
-                }
-              }}
-              style={{ marginLeft: 8 }}
-            >
-              Отправить файл на клиент (chunked)
-            </button>
-          </div>
-
-          <div style={{ marginTop: 12, display: 'flex', gap: 8, alignItems: 'center' }}>
-            <input
-              placeholder="Путь на клиенте для скачивания (например /tmp/output.bin)"
-              style={{ flex: 1 }}
-              id="downloadPath"
-            />
-            <button
-              onClick={async () => {
-                const el = document.getElementById('downloadPath') as HTMLInputElement | null
-                const srcPath = el?.value || ''
-                setError(null)
-                if (!srcPath) {
-                  setError('Укажите путь на клиенте для скачивания')
-                  return
-                }
-                try {
-                  setUploading(true)
-                  // Инициируем скачивание через core_service
-                  const form = new FormData()
-                  form.append('client_id', clientId)
-                  form.append('path', srcPath)
-                  const res = await fetch('/api/files/download', { method: 'POST', body: form, headers: { ...authService.getAuthHeaders() } })
-                  if (!res.ok) {
-                    const txt = await res.text()
-                    throw new Error(`Ошибка ${res.status}: ${txt}`)
-                  }
-                  const data = await res.json()
-                  const transfer_id = data.transfer_id
-                  if (!transfer_id) throw new Error('Не получили transfer_id')
-
-                  setTransferStatus({ transfer_id, state: 'in_progress' })
-                  startPolling(transfer_id, async (st) => {
-                    if (st.state === 'completed') {
-                      const headers = { ...authService.getAuthHeaders() }
-                      const dl = await fetch(`/api/files/download/${transfer_id}`, { headers })
-                      if (!dl.ok) throw new Error(`Download error ${dl.status}`)
-                      const blob = await dl.blob()
-                      const url = URL.createObjectURL(blob)
-                      const a = document.createElement('a')
-                      a.href = url
-                      const name = srcPath.split('/').pop() || (st.original_filename as string) || `file_${transfer_id}`
-                      a.download = name
-                      document.body.appendChild(a)
-                      a.click()
-                      a.remove()
-                      URL.revokeObjectURL(url)
-                    }
-                  })
-                } catch (err) {
-                  console.error('download init error', err)
-                  setError(String(err))
-                  setUploading(false)
-                }
-              }}
-            >
-              Скачать с клиента
-            </button>
-          </div>
-
-          {uploading && transferStatus && (
-            <div style={{ marginTop: 8, padding: 12, background: '#f6f8fa', borderRadius: 6, border: '1px solid #e1e4e8' }}>
-              <div style={{ marginBottom: 8 }}>
-                <strong style={{ fontSize: 14 }}>Передача файла</strong>
-              </div>
-              <div style={{ fontSize: 13, marginBottom: 4 }}>
-                <strong>Направление:</strong> {transferStatus?.direction === 'upload' ? '📤 Отправка на клиент' : '📥 Скачивание с клиента'}
-              </div>
-              {transferStatus?.client_id && (
-                <div style={{ fontSize: 13, marginBottom: 4 }}>
-                  <strong>Клиент:</strong> {String(transferStatus.client_id)}
-                </div>
-              )}
-              {transferStatus?.direction === 'upload' && transferStatus?.path && (
-                <div style={{ fontSize: 13, marginBottom: 4 }}>
-                  <strong>Путь на клиенте:</strong> <code style={{ background: '#fff', padding: '2px 4px', borderRadius: 3 }}>{String(transferStatus.path)}</code>
-                </div>
-              )}
-              {transferStatus?.direction === 'upload' && transferStatus?.original_filename && (
-                <div style={{ fontSize: 13, marginBottom: 4 }}>
-                  <strong>Исходное имя файла:</strong>{' '}
-                  <code style={{ background: '#fff', padding: '2px 4px', borderRadius: 3 }}>{String(transferStatus.original_filename)}</code>
-                </div>
-              )}
-              {transferStatus?.direction === 'upload' && transferStatus?.source_path_server && (
-                <div style={{ fontSize: 13, marginBottom: 4 }}>
-                  <strong>Источник (сервер):</strong> <code style={{ background: '#fff', padding: '2px 4px', borderRadius: 3 }}>{String(transferStatus.source_path_server)}</code>
-                </div>
-              )}
-              {transferStatus?.direction === 'download' && transferStatus?.path && (
-                <div style={{ fontSize: 13, marginBottom: 4 }}>
-                  <strong>Путь на клиенте:</strong> <code style={{ background: '#fff', padding: '2px 4px', borderRadius: 3 }}>{String(transferStatus.path)}</code>
-                </div>
-              )}
-              {transferStatus?.direction === 'download' && transferStatus?.dest_path && (
-                <div style={{ fontSize: 13, marginBottom: 4 }}>
-                  <strong>Сохранение (сервер):</strong> <code style={{ background: '#fff', padding: '2px 4px', borderRadius: 3 }}>{String(transferStatus.dest_path)}</code>
-                </div>
-              )}
-              <div style={{ fontSize: 13, marginBottom: 4 }}>
-                <strong>Статус:</strong> <span style={{ 
-                  color: transferStatus?.state === 'completed' ? '#28a745' : 
-                         transferStatus?.state === 'failed' ? '#dc3545' : 
-                         transferStatus?.state === 'paused' ? '#ffc107' : '#007bff',
-                  fontWeight: 'bold'
-                }}>{String(transferStatus?.state ?? 'unknown')}</span>
-              </div>
-              <div style={{ fontSize: 12, color: '#666', marginBottom: 4 }}>
-                <strong>ID передачи:</strong> <code style={{ background: '#fff', padding: '2px 4px', borderRadius: 3, fontSize: 11 }}>{String(transferStatus?.transfer_id ?? '')}</code>
-              </div>
-              <div style={{ marginTop: 8 }}>
-                <div style={{ height: 12, background: '#eee', borderRadius: 6, overflow: 'hidden' }}>
-                  {typeof transferStatus?.size === 'number' && (
-                    <div
-                      style={{
-                        height: '100%',
-                        width: `${Math.min(100, Math.round(((transferStatus.received as number) || 0) * 100 / (transferStatus.size as number))) }%`,
-                        background: transferStatus?.state === 'completed' ? '#28a745' : 
-                                   transferStatus?.state === 'failed' ? '#dc3545' : '#4f46e5',
-                        transition: 'width 300ms ease'
-                      }}
-                    />
-                  )}
-                </div>
-                <div style={{ fontSize: 12, color: '#666', marginTop: 6 }}>
-                  {Number((transferStatus && (transferStatus.received as number)) || 0).toLocaleString()} / {typeof transferStatus?.size === 'number' ? transferStatus.size.toLocaleString() : 'unknown'} bytes
-                  {typeof transferStatus?.size === 'number' && transferStatus.size > 0 && (
-                    <span style={{ marginLeft: 8 }}>
-                      ({Math.round(((transferStatus.received as number) || 0) * 100 / transferStatus.size)}%)
-                    </span>
-                  )}
-                </div>
-                <div style={{ marginTop: 8, display: 'flex', gap: 8 }}>
-                  {transferStatus?.state === 'in_progress' && (
-                    <>
-                      <button
-                        onClick={async () => {
-                          try {
-                            const headers = { 'Content-Type': 'application/json', ...authService.getAuthHeaders() }
-                            await fetch('/api/files/transfers/pause', { method: 'POST', headers, body: JSON.stringify({ transfer_id: transferStatus?.transfer_id }) })
-                          } catch (err) {
-                            console.error('pause failed', err)
-                          }
-                        }}
-                      >
-                        Pause
-                      </button>
-                      <button
-                        onClick={async () => {
-                          try {
-                            const headers = { 'Content-Type': 'application/json', ...authService.getAuthHeaders() }
-                            await fetch('/api/files/transfers/resume', { method: 'POST', headers, body: JSON.stringify({ transfer_id: transferStatus?.transfer_id }) })
-                          } catch (err) {
-                            console.error('resume failed', err)
-                          }
-                        }}
-                      >
-                        Resume
-                      </button>
-                      <button
-                        onClick={async () => {
-                          try {
-                            const headers = { 'Content-Type': 'application/json', ...authService.getAuthHeaders() }
-                            await fetch('/api/files/transfers/cancel', { method: 'POST', headers, body: JSON.stringify({ transfer_id: transferStatus?.transfer_id }) })
-                          } catch (err) {
-                            console.error('cancel failed', err)
-                          }
-                        }}
-                      >
-                        Cancel
-                      </button>
-                    </>
-                  )}
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
-        <textarea
-          placeholder="Введите команду для выполнения на устройстве"
-          value={command}
-          onChange={(e) => setCommand(e.target.value)}
-          style={{ width: '100%', minHeight: 80 }}
-        />
-        <div style={{ marginTop: 8, display: 'flex', gap: 8 }}>
-          <button onClick={() => sendCommand(false)}>Отправить и ждать</button>
-          <button onClick={() => sendCommand(true)}>Отправить асинхронно</button>
-        </div>
-
-        {result && (
-          <div style={{ marginTop: 12 }}>
-            <strong>Результат:</strong>
-            <div style={{ display: 'flex', gap: 8, marginTop: 8, alignItems: 'center' }}>
-              <button
-                onClick={async () => {
-                  try {
-                      const toCopy = ((): unknown => {
-                        if (result == null) return result
-                        if (typeof result === 'string') return result
-                        if (typeof result === 'object' && result !== null && Object.prototype.hasOwnProperty.call(result, 'result')) {
-                          return (result as Record<string, unknown>)['result']
-                        }
-                        return result
-                      })()
-                      await navigator.clipboard.writeText(JSON.stringify(toCopy, null, 2))
-                    alert('Скопировано в буфер обмена')
-                  } catch (err) {
-                    console.warn('copy failed', err)
-                    alert('Не удалось скопировать')
-                  }
-                }}
-              >
-                Скопировать
-              </button>
-              <button
-                onClick={() => {
-                  try {
-                      const toSave = ((): unknown => {
-                        if (result == null) return result
-                        if (typeof result === 'string') return result
-                        if (typeof result === 'object' && result !== null && Object.prototype.hasOwnProperty.call(result, 'result')) {
-                          return (result as Record<string, unknown>)['result']
-                        }
-                        return result
-                      })()
-                      const blob = new Blob([typeof toSave === 'string' ? toSave : JSON.stringify(toSave, null, 2)], { type: 'application/json' })
-                    const url = URL.createObjectURL(blob)
-                    const a = document.createElement('a')
-                    a.href = url
-                    a.download = `result_${clientId || 'unknown'}.json`
-                    document.body.appendChild(a)
-                    a.click()
-                    a.remove()
-                    URL.revokeObjectURL(url)
-                  } catch (err) {
-                    console.error('save result error', err)
-                    alert('Не удалось сохранить файл')
-                  }
-                }}
-              >
-                Сохранить
-              </button>
-            </div>
-
-            <pre
-              style={{
-                background: '#f6f8fa',
-                padding: 8,
-                color: '#111',
-                whiteSpace: 'pre-wrap',
-                marginTop: 8,
-                borderRadius: 6,
-                overflowX: 'auto',
-              }}
-            >
-              {(() => {
-                const toShow = ((): unknown => {
-                  if (result == null) return result
-                  if (typeof result === 'string') return result
-                  if (typeof result === 'object' && result !== null && Object.prototype.hasOwnProperty.call(result, 'result')) {
-                    return (result as Record<string, unknown>)['result']
-                  }
-                  return result
-                })()
-                try {
-                  return typeof toShow === 'string' ? toShow : JSON.stringify(toShow, null, 2)
-                } catch (err) {
-                  console.error('render result stringify error', err)
-                  return String(toShow)
-                }
-              })()}
-            </pre>
-          </div>
-        )}
       </div>
+
+      <div style={{ marginTop: 12 }}>
+        <h5>Файлы</h5>
+        <input type="file" onChange={(e) => setFileToUpload(e.target.files ? e.target.files[0] : null)} />
+        <div style={{ marginTop: 8 }}>
+          <button onClick={doUpload} disabled={uploading}>{uploading ? 'Загрузка...' : 'Отправить файл'}</button>
+        </div>
+      </div>
+
+      <div style={{ marginTop: 12 }}>
+        <textarea placeholder="Введите команду" value={command} onChange={(e) => setCommand(e.target.value)} style={{ width: '100%', minHeight: 80 }} />
+        <div style={{ marginTop: 8 }}>
+          <button onClick={() => sendCommand(false)}>Отправить и ждать</button>
+          <button onClick={() => sendCommand(true)} style={{ marginLeft: 8 }}>Отправить асинхронно</button>
+        </div>
+      </div>
+
+      {result && (
+        <pre style={{ background: '#f6f8fa', padding: 8, marginTop: 12 }}>{result}</pre>
+      )}
     </div>
   )
+
+  if (routeMode) {
+    return (
+      <div>
+        <div onClick={() => navigate(-1)} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.35)', zIndex: 999 }} />
+        <aside style={{ position: 'fixed', top: 40, right: 0, width: 520, height: 'calc(100vh - 80px)', background: '#fff', padding: 16, boxShadow: '-8px 0 24px rgba(0,0,0,0.12)', zIndex: 1000, overflow: 'auto' }}>
+          {container}
+        </aside>
+      </div>
+    )
+  }
+
+  return container
 }
 
 async function chunkedUpload(file: File, clientId: string, path: string) {
-  const chunkSize = 4 * 1024 * 1024 // 4 MiB
-  const headers = authService.getAuthHeaders()
-  const fingerprint = `${file.name}_${file.size}_${file.lastModified}_${clientId}_${path}`
-  let transferId: string | null = localStorage.getItem(`upload_${fingerprint}`)
-
-  // Если есть transferId — попытаться получить текущий received
-  let received = 0
-  if (transferId) {
-    try {
-      const st = await (await fetch(`/api/files/transfers/${transferId}/status`, { headers: { ...headers } })).json()
-      received = st.received || 0
-    } catch {
-      received = 0
-    }
-  }
-
-  while (received < file.size) {
-    // Parallel upload workers: build list of chunk ranges and upload with concurrency
-    const concurrency = 3
-    const chunks: Array<{ start: number; end: number; index: number }> = []
-    let cursor = received
-    while (cursor < Math.min(file.size, received + chunkSize * 32)) {
-      const s = cursor
-      const e = Math.min(file.size, s + chunkSize)
-      chunks.push({ start: s, end: e, index: s / chunkSize })
-      cursor = e
-    }
-
-    // Ensure uploads map exists
-    type UploadControl = { paused: boolean; cancelled: boolean }
-    let ctrl: UploadControl
-    if (typeof window !== 'undefined') {
-      const w = window as unknown as Window & { __uploads?: Record<string, UploadControl> }
-      w.__uploads = w.__uploads || {}
-      // control object for pause/cancel
-      if (!w.__uploads[fingerprint]) w.__uploads[fingerprint] = { paused: false, cancelled: false }
-      ctrl = w.__uploads[fingerprint]
-    } else {
-      ctrl = { paused: false, cancelled: false }
-    }
-
-    const sendChunk = async (c: { start: number; end: number; index: number }) => {
-      // respect pause/cancel
-      while (ctrl.paused) {
-        if (ctrl.cancelled) throw new Error('cancelled')
-        await new Promise((r) => setTimeout(r, 300))
-      }
-      if (ctrl.cancelled) throw new Error('cancelled')
-      const slice = file.slice(c.start, c.end)
-      const form = new FormData()
-      form.append('client_id', clientId)
-      form.append('path', path)
-      form.append('offset', String(c.start))
-      form.append('file', slice)
-      form.append('original_filename', file.name)
-      if (transferId) form.append('transfer_id', transferId)
-
-      const res = await fetch('/api/files/upload/chunk', { method: 'POST', body: form, headers: { ...headers } })
-      if (!res.ok) {
-        const txt = await res.text()
-        throw new Error(`Upload chunk failed: ${res.status} ${txt}`)
-      }
-      const data = await res.json()
-      transferId = data.transfer_id
-      if (!transferId) throw new Error('Server did not return transfer_id')
-      localStorage.setItem(`upload_${fingerprint}`, transferId)
-      return data.received || (c.end - c.start)
-    }
-
-    // worker pool
-    const pool: Promise<void>[] = []
-    let idx = 0
-    const runNext = async () => {
-      if (idx >= chunks.length) return
-      const c = chunks[idx++]!
-      const r = await sendChunk(c)
-      // update received if this chunk advanced cursor
-      if (c.start + r > received) received = c.start + r
-      return runNext()
-    }
-
-    for (let i = 0; i < concurrency && i < chunks.length; i++) {
-      pool.push(runNext())
-    }
-
-    await Promise.all(pool)
-  }
-
-  // Complete
-  if (!transferId) throw new Error('Missing transfer_id before complete')
-  const formc = new FormData()
-  formc.append('transfer_id', transferId)
-  const rc = await fetch('/api/files/upload/complete', { method: 'POST', body: formc, headers: { ...headers } })
-  if (!rc.ok) {
-    const txt = await rc.text()
-    throw new Error(`Complete failed: ${rc.status} ${txt}`)
-  }
-  // Cleanup local resume info
-  localStorage.removeItem(`upload_${fingerprint}`)
-  return transferId
+  const form = new FormData()
+  form.append('file', file)
+  form.append('client_id', clientId)
+  form.append('path', path)
+  const data = await authService.fetchJson('/api/files/upload/init', { method: 'POST', body: form })
+  return data.transfer_id || null
 }
 
 export default ClientDetail

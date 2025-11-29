@@ -6,8 +6,22 @@ import Login from './Login'
 import SideMenu from './SideMenu'
 import AdminClients from './pages/AdminClients'
 import Home from './pages/Home'
+import Plugins from './pages/Plugins'
+import Registry from './pages/Registry'
+import InstallJob from './pages/InstallJob'
+import InstallJobsList from './pages/InstallJobsList'
+import ClientDetail from './pages/ClientDetail'
+import { useParams } from 'react-router-dom'
+
+function ClientDetailWrapper() {
+  const params = useParams()
+  const clientId = params.clientId || ''
+  return <ClientDetail clientId={clientId} />
+}
+import Yandex from './pages/Yandex'
 import { authService } from './authService'
 import type { User } from './authService'
+import { Routes, Route } from 'react-router-dom'
 
 const AppContainer = styled.div`
   max-width: 1280px;
@@ -129,7 +143,7 @@ function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false)
   const [user, setUser] = useState<User | null>(null)
   const [loading, setLoading] = useState(true)
-  const [currentPage, setCurrentPage] = useState<string>('home')
+  // routing handled by react-router
 
   // Проверяем токен при загрузке приложения
   useEffect(() => {
@@ -189,21 +203,32 @@ function App() {
 
   return (
     <AppContainer>
-      <SideMenu user={user} onLogout={handleLogout} onReconnect={handleReconnect} onNavigate={(p) => setCurrentPage(p)} />
+      <SideMenu user={user} onLogout={handleLogout} onReconnect={handleReconnect} />
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, justifyContent: 'center' }}>
         <Title>Admin Panel</Title>
       </div>
 
       <div style={{ marginTop: 20 }}>
-        {currentPage === 'home' && <Home />}
-        {currentPage === 'clients' && <AdminClients />}
-        {currentPage === 'enrollments' && (
-          <div style={{ textAlign: 'left' }}>
-            <h3>Enrollments</h3>
-            <p>Здесь будет список ожидающих заявок на подключение (enrollments).</p>
-          </div>
-        )}
+        <Routes>
+          <Route path="/" element={<Home />} />
+          <Route path="/clients" element={<AdminClients />} />
+          <Route path="/clients/:clientId" element={<ClientDetailWrapper />} />
+          <Route path="/plugins" element={<Plugins />} />
+          <Route path="/registry" element={<Registry />} />
+          <Route path="/install-jobs" element={<InstallJobsList />} />
+          <Route path="/install-jobs/:jobId" element={<InstallJob />} />
+          <Route path="/yandex" element={<Yandex />} />
+          <Route
+            path="/enrollments"
+            element={(
+              <div style={{ textAlign: 'left' }}>
+                <h3>Enrollments</h3>
+                <p>Здесь будет список ожидающих заявок на подключение (enrollments).</p>
+              </div>
+            )}
+          />
+        </Routes>
       </div>
     </AppContainer>
   )

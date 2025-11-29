@@ -18,6 +18,12 @@ export default defineConfig({
         secure: false,
         ws: true,
       },
+      // Proxy auth endpoints to local auth_service during development
+      '/auth': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+        secure: false,
+      },
       '/ws': {
         // Use 127.0.0.1 to avoid possible IPv6/localhost resolution issues
         target: 'wss://127.0.0.1:10000',

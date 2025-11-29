@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback } from 'react'
 import { authService } from '../authService'
 import useWebSocket from '../hooks/useWebSocket'
 import ClientDetail from './ClientDetail'
+import { useNavigate } from 'react-router-dom'
 
 type ClientInfo = {
   id: string
@@ -17,16 +18,13 @@ const AdminClients: React.FC = () => {
   const [clients, setClients] = useState<ClientInfo[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [selectedClient, setSelectedClient] = useState<string | null>(null)
+  const navigate = useNavigate()
 
   const fetchClients = useCallback(async () => {
     setLoading(true)
     setError(null)
     try {
-      const headers = authService.getAuthHeaders()
-      const res = await fetch(`/api/clients`, { headers: { ...headers } })
-      if (!res.ok) throw new Error('Ошибка получения клиентов')
-      const data = await res.json()
+      const data = await authService.fetchJson('/api/clients')
       setClients(data)
     } catch (e: any) {
       setError(e?.message || String(e))
@@ -84,7 +82,7 @@ const AdminClients: React.FC = () => {
         </thead>
         <tbody>
           {clients.map((c) => (
-            <tr key={c.id} style={{ borderTop: '1px solid #eee', cursor: 'pointer' }} onClick={() => setSelectedClient(c.id)}>
+            <tr key={c.id} style={{ borderTop: '1px solid #eee', cursor: 'pointer' }} onClick={() => navigate(`/clients/${c.id}`)}>
               <td style={{ padding: 8 }}>{c.id}</td>
               <td style={{ padding: 8 }}>{c.hostname || '-'}</td>
               <td style={{ padding: 8 }}>{c.ip || '-'}:{c.port || '-'}</td>
@@ -99,15 +97,6 @@ const AdminClients: React.FC = () => {
         <strong>Последнее WS сообщение:</strong>
         <pre style={{ background: '#f6f8fa', padding: 8 }}>{JSON.stringify(lastMessage, null, 2)}</pre>
       </div>
-
-      {selectedClient && (
-        <div style={{ marginTop: 16 }}>
-          <button onClick={() => setSelectedClient(null)}>Назад к списку</button>
-            <div style={{ marginTop: 8 }}>
-              <ClientDetail clientId={selectedClient} onClose={() => setSelectedClient(null)} />
-            </div>
-        </div>
-      )}
     </div>
   )
 }

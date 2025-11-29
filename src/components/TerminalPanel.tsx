@@ -141,10 +141,7 @@ const TerminalPanel: React.FC<Props> = ({ clientId }) => {
   }
 
   const startNewSessionAndAttach = async () => {
-    const headers = { 'Content-Type': 'application/json', ...authService.getAuthHeaders() }
-    const res = await fetch(`/api/clients/${encodeURIComponent(clientId)}/terminal/start`, { method: 'POST', headers })
-    if (!res.ok) throw new Error(`Error ${res.status}`)
-    const data = await res.json()
+    const data = await authService.fetchJson(`/api/clients/${encodeURIComponent(clientId)}/terminal/start`, { method: 'POST' })
     const sid = data.session_id as string | undefined
     if (!sid) throw new Error('No session_id')
     setSessionId(sid)

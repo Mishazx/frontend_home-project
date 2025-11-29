@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { useNavigate } from 'react-router-dom'
 
 type SideMenuProps = {
   user?: { username?: string } | null;
@@ -9,6 +10,7 @@ type SideMenuProps = {
 
 const SideMenu: React.FC<SideMenuProps> = ({ user, onLogout, onReconnect, onNavigate }) => {
   const [open, setOpen] = useState<boolean>(false);
+  const navigate = useNavigate()
 
   const handleReconnect = () => {
     if (onReconnect) onReconnect();
@@ -72,7 +74,7 @@ const SideMenu: React.FC<SideMenuProps> = ({ user, onLogout, onReconnect, onNavi
           <nav>
             <div style={{ marginBottom: 8 }}>
               <button
-                onClick={() => onNavigate?.('home')}
+                onClick={() => { onNavigate?.('home'); navigate('/') }}
                 style={{
                   width: '100%',
                   textAlign: 'left',
@@ -91,8 +93,12 @@ const SideMenu: React.FC<SideMenuProps> = ({ user, onLogout, onReconnect, onNavi
               <details>
                 <summary style={{ cursor: 'pointer', padding: '8px 10px', borderRadius: 6, listStyle: 'none' }}>Управление</summary>
                 <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 6 }}>
-                  <button onClick={() => onNavigate?.('clients')} style={{ padding: '8px', textAlign: 'left', borderRadius: 6, background: '#071028', color: '#dbeffd', border: 'none' }}>Remote клиенты</button>
-                  <button onClick={() => onNavigate?.('enrollments')} style={{ padding: '8px', textAlign: 'left', borderRadius: 6, background: '#071028', color: '#dbeffd', border: 'none' }}>Enrollments</button>
+                  <button onClick={() => { onNavigate?.('clients'); navigate('/clients') }} style={{ padding: '8px', textAlign: 'left', borderRadius: 6, background: '#071028', color: '#dbeffd', border: 'none' }}>Remote клиенты</button>
+                  <button onClick={() => { onNavigate?.('enrollments'); navigate('/enrollments') }} style={{ padding: '8px', textAlign: 'left', borderRadius: 6, background: '#071028', color: '#dbeffd', border: 'none' }}>Enrollments</button>
+                  <button onClick={() => { onNavigate?.('plugins'); navigate('/plugins') }} style={{ padding: '8px', textAlign: 'left', borderRadius: 6, background: '#071028', color: '#dbeffd', border: 'none' }}>Плагины</button>
+                  <button onClick={() => { onNavigate?.('yandex'); navigate('/yandex') }} style={{ padding: '8px', textAlign: 'left', borderRadius: 6, background: '#071028', color: '#dbeffd', border: 'none' }}>Yandex</button>
+                  <button onClick={() => { onNavigate?.('registry'); navigate('/registry') }} style={{ padding: '8px', textAlign: 'left', borderRadius: 6, background: '#071028', color: '#dbeffd', border: 'none' }}>Registry</button>
+                  <button onClick={() => { onNavigate?.('install_jobs'); navigate('/install-jobs') }} style={{ padding: '8px', textAlign: 'left', borderRadius: 6, background: '#071028', color: '#dbeffd', border: 'none' }}>Install Jobs</button>
                 </div>
               </details>
             </div>
