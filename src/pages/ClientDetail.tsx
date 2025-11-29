@@ -1,8 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { authService } from '../authService'
-import { Terminal } from 'xterm'
-import { FitAddon } from 'xterm-addon-fit'
-import 'xterm/css/xterm.css'
+import TerminalPanel from '../components/TerminalPanel'
 
 type ClientInfo = {
   id: string
@@ -12,6 +10,19 @@ type ClientInfo = {
   status?: string
   connected_at?: string
   last_heartbeat?: string
+}
+
+type TransferStatus = {
+  transfer_id?: string
+  direction?: 'upload' | 'download' | string
+  client_id?: string | number
+  path?: string
+  original_filename?: string
+  source_path_server?: string
+  dest_path?: string
+  state?: 'in_progress' | 'completed' | 'failed' | 'paused' | string
+  size?: number
+  received?: number
 }
 
 type Props = {
@@ -25,63 +36,13 @@ const ClientDetail: React.FC<Props> = ({ clientId, onClose }) => {
   const [command, setCommand] = useState('')
   const [result, setResult] = useState<Record<string, unknown> | string | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [terminalError, setTerminalError] = useState<string | null>(null)
-  const [terminalStatus, setTerminalStatus] = useState<'idle'|'connecting'|'connected'|'disconnected'>('idle')
-  const [sessionId, setSessionId] = useState<string | null>(null)
-  const [userRequestedReconnect, setUserRequestedReconnect] = useState(false)
+  // terminal moved to TerminalPanel component
   const [fileToUpload, setFileToUpload] = useState<File | null>(null)
   const [uploadDest, setUploadDest] = useState<string>('')
-    const [transferStatus, setTransferStatus] = useState<Record<string, any> | null>(null)
+  const [transferStatus, setTransferStatus] = useState<TransferStatus | null>(null)
   const [uploading, setUploading] = useState(false)
-  // terminal input is handled by xterm now
   const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const currentTransferIdRef = useRef<string | null>(null)
-  const xtermRef = useRef<Terminal | null>(null)
-  const fitRef = useRef<FitAddon | null>(null)
-  const wsRef = useRef<WebSocket | null>(null)
-
-  const ensureXterm = () => {
-    let term = xtermRef.current
-    if (!term) {
-      term = new Terminal({ cols: 80, rows: 24, convertEol: true })
-      const fit = new FitAddon()
-      term.loadAddon(fit)
-      const container = document.getElementById('xterm-container') as HTMLDivElement | null
-      if (container) {
-        term.open(container)
-        fit.fit()
-      }
-      xtermRef.current = term
-      fitRef.current = fit
-      term.onData((d: string) => {
-        try {
-          const ws = wsRef.current
-          if (ws && ws.readyState === WebSocket.OPEN) {
-            try {
-              const enc = new TextEncoder()
-              const buf = enc.encode(d)
-              ws.send(buf.buffer)
-            } catch (err) {
-              try { ws.send(d) } catch (e) { void e }
-            }
-          }
-        } catch (err) { console.error('xterm send error', err) }
-      })
-      const onWinResize = () => {
-        try {
-          fitRef.current?.fit()
-          const cols = term?.cols || 80
-          const rows = term?.rows || 24
-          const ws = wsRef.current
-          if (ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: 'resize', cols, rows }))
-          }
-        } catch (err) { void err }
-      }
-      window.addEventListener('resize', onWinResize)
-    }
-    return xtermRef.current
-  }
 
   // Порог для автоматического выбора chunked upload (в байтах).
   // Переопределяется через Vite env `VITE_CHUNKED_THRESHOLD` (например 10485760 = 10 MiB).
@@ -128,25 +89,6 @@ const ClientDetail: React.FC<Props> = ({ clientId, onClose }) => {
   useEffect(() => {
     return () => {
       stopPolling()
-      // cleanup terminal
-      try {
-        if (wsRef.current) {
-          try { wsRef.current.close() } catch (err) { void err }
-          wsRef.current = null
-        }
-        if (xtermRef.current) {
-          try { xtermRef.current.dispose() } catch (err) { void err }
-          xtermRef.current = null
-        }
-        if (fitRef.current) {
-          try {
-            if ((fitRef.current as any).dispose) {
-              (fitRef.current as any).dispose()
-            }
-          } catch (err) { void err }
-          fitRef.current = null
-        }
-      } catch (err) { void err }
     }
   }, [])
 
@@ -160,8 +102,9 @@ const ClientDetail: React.FC<Props> = ({ clientId, onClose }) => {
         if (!res.ok) throw new Error(`Не удалось получить клиента: ${res.status}`)
         const data = await res.json()
         setClient(data)
-      } catch (e: any) {
-        setError(e?.message || String(e))
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e)
+        setError(msg)
       } finally {
         setLoading(false)
       }
@@ -192,8 +135,9 @@ const ClientDetail: React.FC<Props> = ({ clientId, onClose }) => {
       setResult(data)
 
       // Если асинхронно — отобразим command_id и ссылку на статус
-    } catch (e: any) {
-      setError(e?.message || String(e))
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e)
+      setError(msg)
     }
   }
 
@@ -238,336 +182,13 @@ const ClientDetail: React.FC<Props> = ({ clientId, onClose }) => {
 
       <div style={{ marginTop: 12 }}>
         <div style={{ marginTop: 12 }}>
-          <h5>Terminal (PoC)</h5>
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-            <button
-              onClick={async () => {
-                setError(null)
-                  try {
-                    const headers = { 'Content-Type': 'application/json', ...authService.getAuthHeaders() }
-                    const res = await fetch(`/api/clients/${encodeURIComponent(clientId)}/terminal/start`, { method: 'POST', headers })
-                    if (!res.ok) throw new Error(`Error ${res.status}`)
-                    const data = await res.json()
-                    const sid = data.session_id as string | undefined
-                      if (!sid) throw new Error('No session_id')
-                    // remember sessionId for reconnects
-                    setSessionId(sid)
-                    // open websocket and display simple output
-                    // include token as query param because browsers don't allow custom headers for WebSocket
-                    const token = authService.getToken()
-                    // Server expects token in query param with 'Bearer ' prefix for this endpoint
-                    const tokenParam = token ? `?token=${encodeURIComponent(`Bearer ${token}`)}` : ''
-                    const wsUrlBase = `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws/terminal/${sid}`
-
-                    const createOrAttachXterm = () => {
-                      // Create or reuse xterm instance
-                      let term = xtermRef.current
-                      if (!term) {
-                        term = new Terminal({ cols: 80, rows: 24, convertEol: true })
-                        const fit = new FitAddon()
-                        term.loadAddon(fit)
-                        const container = document.getElementById('xterm-container') as HTMLDivElement | null
-                        if (container) {
-                          term.open(container)
-                          fit.fit()
-                        }
-                        xtermRef.current = term
-                        fitRef.current = fit
-                        // onData -> send to ws when open
-                        term.onData((d: string) => {
-                          try {
-                            const ws = wsRef.current
-                            if (ws && ws.readyState === WebSocket.OPEN) {
-                              try {
-                                const enc = new TextEncoder()
-                                const buf = enc.encode(d)
-                                ws.send(buf.buffer)
-                              } catch (err) {
-                                try { ws.send(d) } catch (e) { void e }
-                              }
-                            }
-                          } catch (err) {
-                            console.error('xterm send error', err)
-                          }
-                        })
-                        // handle window resize to fit
-                        const onWinResize = () => {
-                          try {
-                            fit.fit()
-                            const cols = term?.cols || 80
-                            const rows = term?.rows || 24
-                            const ws = wsRef.current
-                            if (ws && ws.readyState === WebSocket.OPEN) {
-                              ws.send(JSON.stringify({ type: 'resize', cols, rows }))
-                            }
-                          } catch (err) { void err }
-                        }
-                        window.addEventListener('resize', onWinResize)
-                      }
-                      return xtermRef.current
-                    }
-
-                    // set connecting status
-                    setTerminalStatus('connecting')
-                    try {
-                      createOrAttachXterm()
-                      const term = xtermRef.current
-                      const wsUrl = wsUrlBase + tokenParam
-                      const openWS = () => {
-                        // close existing if any
-                        try { if (wsRef.current) { wsRef.current.close() } } catch (e) { void e }
-                        const ws = new WebSocket(wsUrl)
-                        wsRef.current = ws
-                        try { ws.binaryType = 'arraybuffer' } catch (err) { void err }
-                        ws.onopen = () => {
-                          console.log('terminal ws open')
-                          setTerminalStatus('connected')
-                          setTerminalError(null)
-                          if (term) {
-                            // clear screen and focus so caret is at expected position
-                            try { term.clear() } catch (err) { void err }
-                            try { term.focus() } catch (err) { void err }
-                            const fit = fitRef.current
-                            try { fit?.fit() } catch (err) { void err }
-                            term.writeln('\x1b[32m-- connected to terminal --\x1b[0m')
-                            // send initial resize
-                            try {
-                              const cols = term.cols || 80
-                              const rows = term.rows || 24
-                              ws.send(JSON.stringify({ type: 'resize', cols, rows }))
-                            } catch (err) { void err }
-                          }
-                          // reset any user reconnect intent
-                          setUserRequestedReconnect(false)
-                        }
-                        ws.onmessage = async (ev) => {
-                          try {
-                            if (typeof ev.data === 'string') {
-                                  // control messages
-                                  try {
-                                    const j = JSON.parse(ev.data)
-                                            if (j && j.type === 'terminal.started') {
-                                              // optional visual
-                                            } else if (j && j.type === 'session.unknown') {
-                                              // Agent/server reports session lost — update UI
-                                              setTerminalStatus('disconnected')
-                                              setTerminalError(j.message || 'Session not present on agent')
-                                              // If user explicitly requested reconnect, fallback to starting a new session automatically
-                                              if (userRequestedReconnect) {
-                                                setUserRequestedReconnect(false)
-                                                // start new session automatically
-                                                try {
-                                                  const headers = { 'Content-Type': 'application/json', ...authService.getAuthHeaders() }
-                                                  const res = await fetch(`/api/clients/${encodeURIComponent(clientId)}/terminal/start`, { method: 'POST', headers })
-                                                  if (!res.ok) throw new Error(`Error ${res.status}`)
-                                                  const data = await res.json()
-                                                  const sidNew = data.session_id as string | undefined
-                                                  if (!sidNew) throw new Error('No session_id')
-                                                  setSessionId(sidNew)
-                                                  ensureXterm()
-                                                  try { if (wsRef.current) wsRef.current.close() } catch (e) { void e }
-                                                  const token = authService.getToken()
-                                                  const tokenParam = token ? `?token=${encodeURIComponent(`Bearer ${token}`)}` : ''
-                                                  const wsUrlNew = `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws/terminal/${sidNew}${tokenParam}`
-                                                  const ws2 = new WebSocket(wsUrlNew)
-                                                  wsRef.current = ws2
-                                                  try { ws2.binaryType = 'arraybuffer' } catch (err) { void err }
-                                                  ws2.onopen = () => { setTerminalStatus('connected'); setTerminalError(null); xtermRef.current?.writeln('\x1b[32m-- connected to terminal (new) --\x1b[0m') }
-                                                  ws2.onmessage = async (ev2) => {
-                                                    try {
-                                                      if (typeof ev2.data === 'string') { try { const j2 = JSON.parse(ev2.data); if (j2 && j2.type === 'session.unknown') { setTerminalStatus('disconnected'); setTerminalError(j2.message) } } catch (e) { void e } }
-                                                      else if (ev2.data instanceof ArrayBuffer) { xtermRef.current?.write(new TextDecoder().decode(new Uint8Array(ev2.data))) }
-                                                      else if (ev2.data instanceof Blob) { const ab2 = await ev2.data.arrayBuffer(); xtermRef.current?.write(new TextDecoder().decode(new Uint8Array(ab2))) }
-                                                    } catch (e) { console.error('new session msg', e) }
-                                                  }
-                                                  ws2.onclose = () => { setTerminalStatus('disconnected'); setTerminalError('WebSocket closed') }
-                                                  ws2.onerror = () => { setTerminalStatus('disconnected'); setTerminalError('WebSocket error') }
-                                                } catch (e) {
-                                                  console.error('auto start new session failed', e)
-                                                }
-                                              }
-                                            } else if (j && j.type === 'error') {
-                                              setTerminalError(j.message || 'Unknown error')
-                                            }
-                                  } catch (err) { void err }
-                            } else if (ev.data instanceof ArrayBuffer) {
-                              const arr = new Uint8Array(ev.data)
-                              const dec = new TextDecoder()
-                              const s = dec.decode(arr)
-                              xtermRef.current?.write(s)
-                            } else if (ev.data instanceof Blob) {
-                              const ab = await ev.data.arrayBuffer()
-                              const arr = new Uint8Array(ab)
-                              const s = new TextDecoder().decode(arr)
-                              xtermRef.current?.write(s)
-                            }
-                          } catch (e) {
-                            console.error('Failed to handle ws msg', e)
-                          }
-                        }
-                        ws.onclose = () => {
-                          console.log('terminal ws closed')
-                          setTerminalStatus('disconnected')
-                          setTerminalError('WebSocket closed')
-                        }
-                        ws.onerror = () => {
-                          console.error('terminal ws error')
-                          setTerminalStatus('disconnected')
-                          setTerminalError('WebSocket error')
-                        }
-                      }
-
-                      openWS()
-                      alert('Terminal session started')
-                    } catch (err) {
-                      const msg = err instanceof Error ? err.message : String(err)
-                      console.error('terminal start failed', msg)
-                      setError(msg)
-                      setTerminalStatus('disconnected')
-                      setTerminalError(msg)
-                    }
-                  } catch (err) {
-                    const msg = err instanceof Error ? err.message : String(err)
-                    console.error('terminal start failed', msg)
-                    setError(msg)
-                  }
-              }}
-            >
-              Open Terminal (PoC)
-            </button>
-            <button onClick={async () => {
-              // download latest recording by asking core via API; user provides session id
-              const sid = prompt('Enter session_id to download recording')
-              if (!sid) return
-              try {
-                const headers = { ...authService.getAuthHeaders() }
-                const res = await fetch(`/api/terminals/${sid}/recording`, { headers })
-                if (!res.ok) throw new Error(`Download error ${res.status}`)
-                const blob = await res.blob()
-                const url = URL.createObjectURL(blob)
-                const a = document.createElement('a')
-                a.href = url
-                a.download = `terminal_${sid}.log`
-                document.body.appendChild(a)
-                a.click()
-                a.remove()
-                URL.revokeObjectURL(url)
-              } catch (e) {
-                console.error('download recording failed', e)
-                alert('Failed to download recording')
-              }
-            }}>Download recording (by session_id)</button>
-          </div>
+          <h5>Terminal</h5>
+          {/* TerminalPanel encapsulates xterm + WebSocket logic and UI controls */}
           <div style={{ marginTop: 8 }}>
-            {/* status banner and recovery actions */}
-            {terminalStatus !== 'connected' && (
-              <div style={{ marginBottom: 8, padding: 8, background: '#fff3cd', border: '1px solid #ffeeba', borderRadius: 6 }}>
-                <div style={{ fontWeight: 600 }}>Terminal: {terminalStatus}</div>
-                {terminalError && <div style={{ color: '#856404', marginTop: 6 }}>{terminalError}</div>}
-                <div style={{ marginTop: 8 }}>
-                  <button onClick={async () => {
-                    // reconnect to existing session
-                    if (!sessionId) {
-                      alert('Нет сохранённой сессии для повторного подключения')
-                      return
-                    }
-                    // mark that user explicitly requested reconnect — used for automatic fallback
-                    setUserRequestedReconnect(true)
-                    setTerminalError(null)
-                    setTerminalStatus('connecting')
-                    try {
-                      ensureXterm()
-                      const token = authService.getToken()
-                      const tokenParam = token ? `?token=${encodeURIComponent(`Bearer ${token}`)}` : ''
-                      const wsUrl = `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws/terminal/${sessionId}${tokenParam}`
-                      try { if (wsRef.current) wsRef.current.close() } catch (e) { void e }
-                      const ws = new WebSocket(wsUrl)
-                      wsRef.current = ws
-                      try { ws.binaryType = 'arraybuffer' } catch (err) { void err }
-                      ws.onopen = () => { setTerminalStatus('connected'); setTerminalError(null); xtermRef.current?.writeln('\x1b[33m-- reconnected to terminal --\x1b[0m') }
-                      ws.onmessage = async (ev) => {
-                        try {
-                          if (typeof ev.data === 'string') {
-                            try {
-                              const j = JSON.parse(ev.data)
-                              if (j && j.type === 'terminal.started') {
-                                // nothing
-                              } else if (j && j.type === 'session.unknown') {
-                                setTerminalStatus('disconnected')
-                                setTerminalError(j.message || 'Session not present on agent')
-                              } else if (j && j.type === 'error') {
-                                setTerminalError(j.message || 'Unknown error')
-                              }
-                            } catch (e) { void e }
-                          } else if (ev.data instanceof ArrayBuffer) {
-                            xtermRef.current?.write(new TextDecoder().decode(new Uint8Array(ev.data)))
-                          } else if (ev.data instanceof Blob) {
-                            const ab = await ev.data.arrayBuffer(); xtermRef.current?.write(new TextDecoder().decode(new Uint8Array(ab)))
-                          }
-                        } catch (e) { console.error('reconnect msg', e) }
-                      }
-                      ws.onclose = () => { setTerminalStatus('disconnected'); setTerminalError('WebSocket closed') }
-                      ws.onerror = () => { setTerminalStatus('disconnected'); setTerminalError('WebSocket error') }
-                    } catch (e) {
-                      console.error('reconnect failed', e)
-                      setTerminalStatus('disconnected')
-                      setTerminalError(String(e))
-                    }
-                  }}>Reconnect</button>
-                  <button style={{ marginLeft: 8 }} onClick={async () => {
-                    // Start a new session (POST) and open it
-                    setTerminalError(null)
-                    setTerminalStatus('connecting')
-                    try {
-                      const headers = { 'Content-Type': 'application/json', ...authService.getAuthHeaders() }
-                      const res = await fetch(`/api/clients/${encodeURIComponent(clientId)}/terminal/start`, { method: 'POST', headers })
-                      if (!res.ok) throw new Error(`Error ${res.status}`)
-                      const data = await res.json()
-                      const sid = data.session_id as string | undefined
-                      if (!sid) throw new Error('No session_id')
-                      setSessionId(sid)
-                      ensureXterm()
-                      const token = authService.getToken()
-                      const tokenParam = token ? `?token=${encodeURIComponent(`Bearer ${token}`)}` : ''
-                      const wsUrl = `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws/terminal/${sid}${tokenParam}`
-                      try { if (wsRef.current) wsRef.current.close() } catch (e) { void e }
-                      const ws = new WebSocket(wsUrl)
-                      wsRef.current = ws
-                      try { ws.binaryType = 'arraybuffer' } catch (err) { void err }
-                      ws.onopen = () => { setTerminalStatus('connected'); setTerminalError(null); xtermRef.current?.writeln('\x1b[32m-- connected to terminal --\x1b[0m') }
-                      ws.onmessage = async (ev) => {
-                        try {
-                          if (typeof ev.data === 'string') {
-                            try {
-                              const j = JSON.parse(ev.data)
-                              if (j && j.type === 'terminal.started') {
-                                // nothing
-                              } else if (j && j.type === 'session.unknown') {
-                                setTerminalStatus('disconnected')
-                                setTerminalError(j.message || 'Session not present on agent')
-                              } else if (j && j.type === 'error') {
-                                setTerminalError(j.message || 'Unknown error')
-                              }
-                            } catch (e) { void e }
-                          } else if (ev.data instanceof ArrayBuffer) {
-                            xtermRef.current?.write(new TextDecoder().decode(new Uint8Array(ev.data)))
-                          } else if (ev.data instanceof Blob) {
-                            const ab = await ev.data.arrayBuffer(); xtermRef.current?.write(new TextDecoder().decode(new Uint8Array(ab)))
-                          }
-                        } catch (e) { console.error('start new session msg', e) }
-                      }
-                      ws.onclose = () => { setTerminalStatus('disconnected'); setTerminalError('WebSocket closed') }
-                      ws.onerror = () => { setTerminalStatus('disconnected'); setTerminalError('WebSocket error') }
-                    } catch (e) {
-                      console.error('start new session failed', e)
-                      setTerminalStatus('disconnected')
-                      setTerminalError(String(e))
-                    }
-                  }}>Start New Session</button>
-                </div>
-              </div>
-            )}
-            <div id="xterm-container" style={{ width: '100%', height: 360, background: '#000' }} />
+            {/* Lazy load component to keep bundle size small in future if needed */}
+            <React.Suspense fallback={<div>Loading terminal...</div>}>
+              <TerminalPanel clientId={clientId} />
+            </React.Suspense>
           </div>
         </div>
 
@@ -735,46 +356,46 @@ const ClientDetail: React.FC<Props> = ({ clientId, onClose }) => {
                 <strong style={{ fontSize: 14 }}>Передача файла</strong>
               </div>
               <div style={{ fontSize: 13, marginBottom: 4 }}>
-                <strong>Направление:</strong> {transferStatus.direction === 'upload' ? '📤 Отправка на клиент' : '📥 Скачивание с клиента'}
+                <strong>Направление:</strong> {transferStatus?.direction === 'upload' ? '📤 Отправка на клиент' : '📥 Скачивание с клиента'}
               </div>
-              {transferStatus.client_id && (
+              {transferStatus?.client_id && (
                 <div style={{ fontSize: 13, marginBottom: 4 }}>
                   <strong>Клиент:</strong> {String(transferStatus.client_id)}
                 </div>
               )}
-              {transferStatus.direction === 'upload' && transferStatus.path && (
+              {transferStatus?.direction === 'upload' && transferStatus?.path && (
                 <div style={{ fontSize: 13, marginBottom: 4 }}>
                   <strong>Путь на клиенте:</strong> <code style={{ background: '#fff', padding: '2px 4px', borderRadius: 3 }}>{String(transferStatus.path)}</code>
                 </div>
               )}
-              {transferStatus.direction === 'upload' && transferStatus.original_filename && (
+              {transferStatus?.direction === 'upload' && transferStatus?.original_filename && (
                 <div style={{ fontSize: 13, marginBottom: 4 }}>
                   <strong>Исходное имя файла:</strong>{' '}
                   <code style={{ background: '#fff', padding: '2px 4px', borderRadius: 3 }}>{String(transferStatus.original_filename)}</code>
                 </div>
               )}
-              {transferStatus.direction === 'upload' && transferStatus.source_path_server && (
+              {transferStatus?.direction === 'upload' && transferStatus?.source_path_server && (
                 <div style={{ fontSize: 13, marginBottom: 4 }}>
                   <strong>Источник (сервер):</strong> <code style={{ background: '#fff', padding: '2px 4px', borderRadius: 3 }}>{String(transferStatus.source_path_server)}</code>
                 </div>
               )}
-              {transferStatus.direction === 'download' && transferStatus.path && (
+              {transferStatus?.direction === 'download' && transferStatus?.path && (
                 <div style={{ fontSize: 13, marginBottom: 4 }}>
                   <strong>Путь на клиенте:</strong> <code style={{ background: '#fff', padding: '2px 4px', borderRadius: 3 }}>{String(transferStatus.path)}</code>
                 </div>
               )}
-              {transferStatus.direction === 'download' && transferStatus.dest_path && (
+              {transferStatus?.direction === 'download' && transferStatus?.dest_path && (
                 <div style={{ fontSize: 13, marginBottom: 4 }}>
                   <strong>Сохранение (сервер):</strong> <code style={{ background: '#fff', padding: '2px 4px', borderRadius: 3 }}>{String(transferStatus.dest_path)}</code>
                 </div>
               )}
               <div style={{ fontSize: 13, marginBottom: 4 }}>
                 <strong>Статус:</strong> <span style={{ 
-                  color: transferStatus.state === 'completed' ? '#28a745' : 
-                         transferStatus.state === 'failed' ? '#dc3545' : 
-                         transferStatus.state === 'paused' ? '#ffc107' : '#007bff',
+                  color: transferStatus?.state === 'completed' ? '#28a745' : 
+                         transferStatus?.state === 'failed' ? '#dc3545' : 
+                         transferStatus?.state === 'paused' ? '#ffc107' : '#007bff',
                   fontWeight: 'bold'
-                }}>{String(transferStatus.state ?? 'unknown')}</span>
+                }}>{String(transferStatus?.state ?? 'unknown')}</span>
               </div>
               <div style={{ fontSize: 12, color: '#666', marginBottom: 4 }}>
                 <strong>ID передачи:</strong> <code style={{ background: '#fff', padding: '2px 4px', borderRadius: 3, fontSize: 11 }}>{String(transferStatus?.transfer_id ?? '')}</code>
@@ -786,8 +407,8 @@ const ClientDetail: React.FC<Props> = ({ clientId, onClose }) => {
                       style={{
                         height: '100%',
                         width: `${Math.min(100, Math.round(((transferStatus.received as number) || 0) * 100 / (transferStatus.size as number))) }%`,
-                        background: transferStatus.state === 'completed' ? '#28a745' : 
-                                   transferStatus.state === 'failed' ? '#dc3545' : '#4f46e5',
+                        background: transferStatus?.state === 'completed' ? '#28a745' : 
+                                   transferStatus?.state === 'failed' ? '#dc3545' : '#4f46e5',
                         transition: 'width 300ms ease'
                       }}
                     />
@@ -802,13 +423,13 @@ const ClientDetail: React.FC<Props> = ({ clientId, onClose }) => {
                   )}
                 </div>
                 <div style={{ marginTop: 8, display: 'flex', gap: 8 }}>
-                  {transferStatus.state === 'in_progress' && (
+                  {transferStatus?.state === 'in_progress' && (
                     <>
                       <button
                         onClick={async () => {
                           try {
                             const headers = { 'Content-Type': 'application/json', ...authService.getAuthHeaders() }
-                            await fetch('/api/files/transfers/pause', { method: 'POST', headers, body: JSON.stringify({ transfer_id: transferStatus.transfer_id }) })
+                            await fetch('/api/files/transfers/pause', { method: 'POST', headers, body: JSON.stringify({ transfer_id: transferStatus?.transfer_id }) })
                           } catch (err) {
                             console.error('pause failed', err)
                           }
@@ -820,7 +441,7 @@ const ClientDetail: React.FC<Props> = ({ clientId, onClose }) => {
                         onClick={async () => {
                           try {
                             const headers = { 'Content-Type': 'application/json', ...authService.getAuthHeaders() }
-                            await fetch('/api/files/transfers/resume', { method: 'POST', headers, body: JSON.stringify({ transfer_id: transferStatus.transfer_id }) })
+                            await fetch('/api/files/transfers/resume', { method: 'POST', headers, body: JSON.stringify({ transfer_id: transferStatus?.transfer_id }) })
                           } catch (err) {
                             console.error('resume failed', err)
                           }
@@ -832,7 +453,7 @@ const ClientDetail: React.FC<Props> = ({ clientId, onClose }) => {
                         onClick={async () => {
                           try {
                             const headers = { 'Content-Type': 'application/json', ...authService.getAuthHeaders() }
-                            await fetch('/api/files/transfers/cancel', { method: 'POST', headers, body: JSON.stringify({ transfer_id: transferStatus.transfer_id }) })
+                            await fetch('/api/files/transfers/cancel', { method: 'POST', headers, body: JSON.stringify({ transfer_id: transferStatus?.transfer_id }) })
                           } catch (err) {
                             console.error('cancel failed', err)
                           }
