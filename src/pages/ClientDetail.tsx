@@ -1,5 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { authService } from '../authService'
+import { Terminal } from 'xterm'
+import { FitAddon } from 'xterm-addon-fit'
+import 'xterm/css/xterm.css'
 
 type ClientInfo = {
   id: string
@@ -29,6 +32,9 @@ const ClientDetail: React.FC<Props> = ({ clientId, onClose }) => {
   const [terminalInputText, setTerminalInputText] = useState('')
   const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const currentTransferIdRef = useRef<string | null>(null)
+  const xtermRef = useRef<Terminal | null>(null)
+  const fitRef = useRef<FitAddon | null>(null)
+  const wsRef = useRef<WebSocket | null>(null)
 
   // Порог для автоматического выбора chunked upload (в байтах).
   // Переопределяется через Vite env `VITE_CHUNKED_THRESHOLD` (например 10485760 = 10 MiB).
@@ -74,6 +80,25 @@ const ClientDetail: React.FC<Props> = ({ clientId, onClose }) => {
   useEffect(() => {
     return () => {
       stopPolling()
+      // cleanup terminal
+      try {
+        if (wsRef.current) {
+          try { wsRef.current.close() } catch (err) { void err }
+          wsRef.current = null
+        }
+        if (xtermRef.current) {
+          try { xtermRef.current.dispose() } catch (err) { void err }
+          xtermRef.current = null
+        }
+        if (fitRef.current) {
+          try {
+            if ((fitRef.current as any).dispose) {
+              (fitRef.current as any).dispose()
+            }
+          } catch (err) { void err }
+          fitRef.current = null
+        }
+      } catch (err) { void err }
     }
   }, [])
 
@@ -183,44 +208,97 @@ const ClientDetail: React.FC<Props> = ({ clientId, onClose }) => {
                   // Server expects token in query param with 'Bearer ' prefix for this endpoint
                   const tokenParam = token ? `?token=${encodeURIComponent(`Bearer ${token}`)}` : ''
                   const wsUrl = `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws/terminal/${sid}${tokenParam}`
+                  // Create or reuse xterm instance
+                  let term = xtermRef.current
+                  if (!term) {
+                    term = new Terminal({ cols: 80, rows: 24, convertEol: true })
+                    const fit = new FitAddon()
+                    term.loadAddon(fit)
+                    const container = document.getElementById('xterm-container') as HTMLDivElement | null
+                    if (container) {
+                      term.open(container)
+                      fit.fit()
+                    }
+                    xtermRef.current = term
+                    fitRef.current = fit
+                    // onData -> send to ws when open
+                    term.onData((d: string) => {
+                      try {
+                        const ws = wsRef.current
+                        if (ws && ws.readyState === WebSocket.OPEN) {
+                          try {
+                            const enc = new TextEncoder()
+                            const buf = enc.encode(d)
+                            ws.send(buf.buffer)
+                          } catch (err) {
+                            try { ws.send(d) } catch (e) { void e }
+                          }
+                        }
+                      } catch (err) {
+                        console.error('xterm send error', err)
+                      }
+                    })
+                    // handle window resize to fit
+                    const onWinResize = () => {
+                      try {
+                        fit.fit()
+                        const cols = term?.cols || 80
+                        const rows = term?.rows || 24
+                        const ws = wsRef.current
+                        if (ws && ws.readyState === WebSocket.OPEN) {
+                          ws.send(JSON.stringify({ type: 'resize', cols, rows }))
+                        }
+                      } catch (err) { void err }
+                    }
+                    window.addEventListener('resize', onWinResize)
+                  }
+
                   const ws = new WebSocket(wsUrl)
-                  // prefer arraybuffer for binary payloads
-                  try { ws.binaryType = 'arraybuffer' } catch (_) {}
+                  wsRef.current = ws
+                  try { ws.binaryType = 'arraybuffer' } catch (err) { void err }
                   ws.onopen = () => {
                     console.log('terminal ws open')
-                    const el = document.getElementById('terminal_output') as HTMLTextAreaElement | null
-                    if (el) el.value = el.value + '\n-- connected to terminal --\n'
+                    const term = xtermRef.current
+                    if (term) {
+                      const fit = fitRef.current
+                      try { fit?.fit() } catch (err) { void err }
+                      term.writeln('\x1b[32m-- connected to terminal --\x1b[0m')
+                      // send initial resize
+                      try {
+                        const cols = term.cols || 80
+                        const rows = term.rows || 24
+                        ws.send(JSON.stringify({ type: 'resize', cols, rows }))
+                      } catch (err) { void err }
+                    }
                   }
                   ws.onmessage = async (ev) => {
-                    let text: string | null = null
                     try {
                       if (typeof ev.data === 'string') {
-                        text = ev.data
-                      } else if (ev.data instanceof Blob) {
-                        text = await ev.data.text()
-                      } else if (ev.data instanceof ArrayBuffer) {
-                        text = new TextDecoder().decode(ev.data)
-                      } else {
-                        // fallback
+                        // control messages
                         try {
-                          text = String(ev.data)
-                        } catch (e) {
-                          text = null
-                        }
+                          const j = JSON.parse(ev.data)
+                          if (j && j.type === 'terminal.started') {
+                            // optional visual
+                          }
+                        } catch (err) { void err }
+                      } else if (ev.data instanceof ArrayBuffer) {
+                        const arr = new Uint8Array(ev.data)
+                        const dec = new TextDecoder()
+                        const s = dec.decode(arr)
+                        xtermRef.current?.write(s)
+                      } else if (ev.data instanceof Blob) {
+                          const ab = await ev.data.arrayBuffer()
+                          const arr = new Uint8Array(ab)
+                          const s = new TextDecoder().decode(arr)
+                          xtermRef.current?.write(s)
                       }
                     } catch (e) {
-                      console.error('Failed to decode ws message', e)
-                    }
-                    if (text !== null) {
-                      const el = document.getElementById('terminal_output') as HTMLTextAreaElement | null
-                      if (el) el.value = el.value + text
+                      console.error('Failed to handle ws msg', e)
                     }
                   }
                   ws.onclose = () => console.log('terminal ws closed')
                   ws.onerror = (e) => console.error('terminal ws error', e)
-                  // store ws on window for quick interaction (PoC)
-                  ;(window as unknown as any).__terminal_ws = ws
-                  alert('Terminal session started; simple PoC will append text to the page')
+                  alert('Terminal session started')
                 } catch (err) {
                   console.error('terminal start failed', err)
                   setError(String(err))
@@ -253,42 +331,7 @@ const ClientDetail: React.FC<Props> = ({ clientId, onClose }) => {
             }}>Download recording (by session_id)</button>
           </div>
           <div style={{ marginTop: 8 }}>
-            <textarea id="terminal_output" style={{ width: '100%', height: 240 }} readOnly />
-            <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-              <input
-                placeholder="Type and press Enter to send to terminal"
-                value={terminalInputText}
-                onChange={(e) => setTerminalInputText(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    e.preventDefault()
-                    try {
-                      const ws: any = (window as any).__terminal_ws
-                      if (ws && ws.readyState === WebSocket.OPEN) {
-                        ws.send(terminalInputText + '\n')
-                      }
-                    } catch (err) {
-                      console.error('send terminal input failed', err)
-                    }
-                    setTerminalInputText('')
-                  }
-                }}
-                style={{ flex: 1 }}
-              />
-              <button
-                onClick={() => {
-                  try {
-                    const ws: any = (window as any).__terminal_ws
-                    if (ws && ws.readyState === WebSocket.OPEN) {
-                      ws.send(terminalInputText + '\n')
-                    }
-                  } catch (err) {
-                    console.error('send terminal input failed', err)
-                  }
-                  setTerminalInputText('')
-                }}
-              >Send</button>
-            </div>
+            <div id="xterm-container" style={{ width: '100%', height: 360, background: '#000' }} />
           </div>
         </div>
 
