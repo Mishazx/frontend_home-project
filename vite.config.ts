@@ -19,7 +19,8 @@ export default defineConfig({
         ws: true,
       },
       '/ws': {
-        target: 'https://localhost:10000',
+        // Use 127.0.0.1 to avoid possible IPv6/localhost resolution issues
+        target: 'wss://127.0.0.1:10000',
         changeOrigin: true,
         secure: false,
         ws: true,

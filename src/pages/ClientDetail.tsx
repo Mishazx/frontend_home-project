@@ -26,6 +26,7 @@ const ClientDetail: React.FC<Props> = ({ clientId, onClose }) => {
   const [uploadDest, setUploadDest] = useState<string>('')
     const [transferStatus, setTransferStatus] = useState<Record<string, any> | null>(null)
   const [uploading, setUploading] = useState(false)
+  const [terminalInputText, setTerminalInputText] = useState('')
   const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const currentTransferIdRef = useRef<string | null>(null)
 
@@ -163,6 +164,134 @@ const ClientDetail: React.FC<Props> = ({ clientId, onClose }) => {
       )}
 
       <div style={{ marginTop: 12 }}>
+        <div style={{ marginTop: 12 }}>
+          <h5>Terminal (PoC)</h5>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <button
+              onClick={async () => {
+                setError(null)
+                try {
+                  const headers = { 'Content-Type': 'application/json', ...authService.getAuthHeaders() }
+                  const res = await fetch(`/api/clients/${encodeURIComponent(clientId)}/terminal/start`, { method: 'POST', headers })
+                  if (!res.ok) throw new Error(`Error ${res.status}`)
+                  const data = await res.json()
+                  const sid = data.session_id
+                  if (!sid) throw new Error('No session_id')
+                  // open websocket and display simple output
+                  // include token as query param because browsers don't allow custom headers for WebSocket
+                  const token = authService.getToken()
+                  // Server expects token in query param with 'Bearer ' prefix for this endpoint
+                  const tokenParam = token ? `?token=${encodeURIComponent(`Bearer ${token}`)}` : ''
+                  const wsUrl = `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws/terminal/${sid}${tokenParam}`
+                  const ws = new WebSocket(wsUrl)
+                  // prefer arraybuffer for binary payloads
+                  try { ws.binaryType = 'arraybuffer' } catch (_) {}
+                  ws.onopen = () => {
+                    console.log('terminal ws open')
+                    const el = document.getElementById('terminal_output') as HTMLTextAreaElement | null
+                    if (el) el.value = el.value + '\n-- connected to terminal --\n'
+                  }
+                  ws.onmessage = async (ev) => {
+                    let text: string | null = null
+                    try {
+                      if (typeof ev.data === 'string') {
+                        text = ev.data
+                      } else if (ev.data instanceof Blob) {
+                        text = await ev.data.text()
+                      } else if (ev.data instanceof ArrayBuffer) {
+                        text = new TextDecoder().decode(ev.data)
+                      } else {
+                        // fallback
+                        try {
+                          text = String(ev.data)
+                        } catch (e) {
+                          text = null
+                        }
+                      }
+                    } catch (e) {
+                      console.error('Failed to decode ws message', e)
+                    }
+                    if (text !== null) {
+                      const el = document.getElementById('terminal_output') as HTMLTextAreaElement | null
+                      if (el) el.value = el.value + text
+                    }
+                  }
+                  ws.onclose = () => console.log('terminal ws closed')
+                  ws.onerror = (e) => console.error('terminal ws error', e)
+                  // store ws on window for quick interaction (PoC)
+                  ;(window as unknown as any).__terminal_ws = ws
+                  alert('Terminal session started; simple PoC will append text to the page')
+                } catch (err) {
+                  console.error('terminal start failed', err)
+                  setError(String(err))
+                }
+              }}
+            >
+              Open Terminal (PoC)
+            </button>
+            <button onClick={async () => {
+              // download latest recording by asking core via API; user provides session id
+              const sid = prompt('Enter session_id to download recording')
+              if (!sid) return
+              try {
+                const headers = { ...authService.getAuthHeaders() }
+                const res = await fetch(`/api/terminals/${sid}/recording`, { headers })
+                if (!res.ok) throw new Error(`Download error ${res.status}`)
+                const blob = await res.blob()
+                const url = URL.createObjectURL(blob)
+                const a = document.createElement('a')
+                a.href = url
+                a.download = `terminal_${sid}.log`
+                document.body.appendChild(a)
+                a.click()
+                a.remove()
+                URL.revokeObjectURL(url)
+              } catch (e) {
+                console.error('download recording failed', e)
+                alert('Failed to download recording')
+              }
+            }}>Download recording (by session_id)</button>
+          </div>
+          <div style={{ marginTop: 8 }}>
+            <textarea id="terminal_output" style={{ width: '100%', height: 240 }} readOnly />
+            <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+              <input
+                placeholder="Type and press Enter to send to terminal"
+                value={terminalInputText}
+                onChange={(e) => setTerminalInputText(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault()
+                    try {
+                      const ws: any = (window as any).__terminal_ws
+                      if (ws && ws.readyState === WebSocket.OPEN) {
+                        ws.send(terminalInputText + '\n')
+                      }
+                    } catch (err) {
+                      console.error('send terminal input failed', err)
+                    }
+                    setTerminalInputText('')
+                  }
+                }}
+                style={{ flex: 1 }}
+              />
+              <button
+                onClick={() => {
+                  try {
+                    const ws: any = (window as any).__terminal_ws
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                      ws.send(terminalInputText + '\n')
+                    }
+                  } catch (err) {
+                    console.error('send terminal input failed', err)
+                  }
+                  setTerminalInputText('')
+                }}
+              >Send</button>
+            </div>
+          </div>
+        </div>
+
         <div style={{ marginTop: 12, borderTop: '1px solid #eee', paddingTop: 12 }}>
           <h5>Файлы</h5>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
